@@ -48,6 +48,23 @@ Recomputed from WorldClim's own monthly layers over Iberia (`examples/verify_bio
 The same variable name therefore means different quantities in the two sources. Do not mix them
 without converting.
 
+Why: WorldClim's variables follow R's `dismo::biovars`
+([source](https://github.com/cran/dismo/blob/master/R/biovars.R)): `p[,4] <- 100 * apply(tavg, 1, sd)`,
+where R's `sd()` divides by n-1, and `p[,15] <- apply(prec+1, 1, cv)`, commented *"the "1 +" is to
+avoid strange CVs for areas where mean rainfaill is < 1"*. CHELSA computes its own way.
+
+Per-pixel ratios (1st percentile / median / 99th percentile), measured 2026-11-08:
+
+| Ratio | WorldClim, 10', Iberia (2,731 px) | CHELSA, 30", 39N 6W (14,400 px) |
+|---|---|---|
+| bio4 / (100 x sample SD) | 0.9997 / 1.0000 / 1.0004 | 0.9574 / 0.9574 / 0.9575 |
+| bio4 / (100 x population SD) | 1.0441 / 1.0445 / 1.0449 | 0.9999 / 1.0000 / 1.0001 |
+| bio15 / CV(prec + 1, sample SD) | 1.0000 / 1.0000 / 1.0000 | 0.9697 / 0.9744 / 0.9795 |
+| bio15 / CV(prec, population SD) | 1.0042 / 1.0235 / 1.0368 | 0.9991 / 1.0000 / 1.0009 |
+
+WorldClim was checked at 10 arc-minutes, whose monthly layers are small enough to download; the 30
+arc-second files come from the same software but were not checked directly.
+
 ## Agreement with an independent reference
 
 The network tests convert `bio1` over central Iberia (6-3W, 39-42N) and compare the pyramid means
