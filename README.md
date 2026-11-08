@@ -65,6 +65,37 @@ Per-pixel ratios (1st percentile / median / 99th percentile), measured 2026-11-0
 WorldClim was checked at 10 arc-minutes, whose monthly layers are small enough to download; the 30
 arc-second files come from the same software but were not checked directly.
 
+## Conventions: comparing with CHELSA
+
+CHELSA and WorldClim give the same BIOCLIM names to differently computed values: CHELSA uses the
+population standard deviation (n) and the CV of monthly precipitation; WorldClim follows R's
+`dismo::biovars`, with the sample standard deviation (n-1) and the CV of monthly precipitation
+plus 1 mm. `bio4` differs by sqrt(12/11), about 4.4 %, everywhere.
+
+`convention=` converts exactly, so values from the two sources can be compared:
+
+```python
+convert("bio4",  bbox, "bio4.zarr",  convention="population")    # as CHELSA computes it
+convert("bio15", bbox, "bio15.zarr", convention="population")    # also reads bio12 (see below)
+```
+
+| `convention` | Meaning |
+|---|---|
+| `"as-published"` (default) | the source's own values (dismo convention) |
+| `"population"` | population SD, CV of monthly precipitation (CHELSA's) |
+| `"dismo"` | sample SD, CV of monthly precipitation + 1 mm (WorldClim's) |
+
+- `bio4`: rescaled by sqrt(11/12) or sqrt(12/11), exact (both use the same 12 monthly values).
+- `bio15`: adding 1 mm to every month leaves the standard deviation unchanged and raises the mean
+  m = bio12 / 12 by 1, so the conversion uses `bio12` of the same source:
+  CV_population = CV_dismo x (m + 1) / m x sqrt(11/12), and its inverse. Where it never rains
+  (m = 0) the population CV is missing and the dismo CV is 0. Checked against the CV recomputed
+  from the monthly layers: ratio 1.00000 (WorldClim to population) and 1.0000 +- 0.0009 (CHELSA to
+  dismo, whose values are stored to 0.1).
+- `bio1`, `bio12`: defined alike, unchanged.
+
+The output states its convention (`bioclim_convention`) and, when converted, how (`comment`).
+
 ## Agreement with an independent reference
 
 The network tests convert `bio1` over central Iberia (6-3W, 39-42N) and compare the pyramid means
