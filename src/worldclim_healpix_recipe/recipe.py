@@ -1,13 +1,11 @@
-"""The WorldClim recipe: source description, variable definitions, staging and healpix-convert settings."""
+"""The WorldClim recipe: what is specific to WorldClim 2.1. The rest comes from healpix-recipe-tools."""
 
 from __future__ import annotations
 
-import os
+import dataclasses
 from pathlib import Path
 
-import numpy as np
-
-from worldclim_healpix_recipe import conventions
+from healpix_recipe_tools import bioclim, gdal_path, raster_settings, read_window, run, stac_item, write_staged
 
 #: The source, as cited. WorldClim 2.1, 1970-2000, EPSG:4326.
 SOURCE = {
@@ -33,6 +31,11 @@ SOURCE = {
 #: Resolutions WorldClim 2.1 publishes; 30s is about 1 km.
 RESOLUTIONS = ("30s", "2.5m", "5m", "10m")
 
+#: WorldClim's BIOCLIM convention (dismo::biovars): sample standard deviation, CV of precipitation + 1 mm.
+SOURCE_CONVENTION = bioclim.SOURCES["WorldClim 2.1"]
+
+GROUP = "worldclim/v21"
+
 #: Variables with verified definitions. The GeoTIFFs hold float32 values in these units (no scale,
 #: nodata -3.4e38). bio4 and bio15 follow dismo::biovars and differ from CHELSA's: checked against
 #: WorldClim's own monthly layers (examples/verify_bio_definitions.py).
@@ -49,134 +52,49 @@ VARIABLES = {
                            "plus 1 mm, sample standard deviation (BIO15)"},
 }
 
-_WGS84 = {"name": "wgs84"}
-
-
-def _number(variable: str) -> int:
-    return int(variable.removeprefix("bio"))
+_LICENSE_LINK = {"rel": "license", "href": SOURCE["terms_url"], "type": "text/html",
+                 "title": "WorldClim terms of use"}
 
 
 def settings(variable: str, depth: int = 13, pyramid_to: int = 8, chunk_depth: int = 7,
              convention: str = "as-published") -> dict:
-    """healpix-convert settings for one variable, as plain data.
-
-    WorldClim (about 1 km at 30s) is resampled bilinearly at ``depth`` (13 is about 800 m), then the
-    pyramid builds the coarser depths down to ``pyramid_to`` with ``mean``: on equal-area cells,
-    block means are area-weighted cell means.
-    """
-    meta = {**VARIABLES[variable], **conventions.attrs(variable, convention)}
-    return {
-        "metadata": {
-            "stac": {
-                "override_properties": {"license": SOURCE["license"]},
-                "override_links": [{"rel": "license", "href": SOURCE["terms_url"], "type": "text/html",
-                                    "title": "WorldClim terms of use"}],
-            },
-        },
-        "multiscale_settings": {
-            "groups": ["worldclim"],
-            "pyramid_groups": {
-                "worldclim": {"derived_levels": list(range(depth - 1, pyramid_to - 1, -1)), "reduce": "mean"},
-            },
-        },
-        "group_settings": {
-            "worldclim/v21": {
-                "healpix": {"refinement_level": depth, "indexing_scheme": "nested", "ellipsoid": _WGS84},
-                "chunk": {
-                    "method": "healpix_cell_dense",
-                    "healpix": {"refinement_level": chunk_depth, "indexing_scheme": "nested", "ellipsoid": _WGS84},
-                    "chunk_buffer_width": 3000.0,  # metres: a few WorldClim pixels
-                },
-                "resampler": {"name": "bilinear"},
-                "output_dtype": "float32",
-                "metadata": {"override_attrs": {variable: dict(meta)}},
-            },
-        },
-    }
+    """healpix-convert settings for one variable, as plain data (see healpix_recipe_tools.raster_settings)."""
+    attrs = {**VARIABLES[variable], **bioclim.attrs(variable, convention, SOURCE_CONVENTION)}
+    return raster_settings(GROUP, variable, attrs, depth=depth, pyramid_to=pyramid_to, chunk_depth=chunk_depth,
+                           license=SOURCE["license"], license_links=[_LICENSE_LINK])
 
 
-def _read_window(variable: str, bbox: tuple[float, float, float, float], pad_deg: float, res: str):
-    """WorldClim pixels in ``bbox`` + ``pad_deg``, nodata as NaN, rows south to north.
-
-    The GeoTIFF is read inside the remote zip (GDAL /vsizip/ over /vsicurl/): no download of the
-    10 GB archive, but a window takes tens of seconds, since the member is compressed.
-    """
-    import rasterio
-    from rasterio.windows import from_bounds
-
+def _read(variable: str, bbox, pad_deg: float, res: str):
+    """One GeoTIFF read inside WorldClim's remote zip: no download, but tens of seconds per window."""
     if res not in RESOLUTIONS:
         raise ValueError(f"res must be one of {RESOLUTIONS}")
-    os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
-    os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".zip,.tif")
-    path = ("/vsizip//vsicurl/" + SOURCE["url_template"].format(res=res) + "/"
-            + SOURCE["member_template"].format(res=res, n=_number(variable)))
-    w, s, e, n = bbox[0] - pad_deg, bbox[1] - pad_deg, bbox[2] + pad_deg, bbox[3] + pad_deg
-    with rasterio.open(path) as src:
-        win = from_bounds(w, s, e, n, src.transform).round_offsets().round_lengths()
-        raw = src.read(1, window=win)
-        scale, offset, nodata = src.scales[0], src.offsets[0], src.nodata
-        t = src.window_transform(win)
-    values = raw.astype("float64")
-    if nodata is not None:
-        values[raw == nodata] = np.nan
-    values = values * scale + offset
-    lon = t.c + t.a * (np.arange(values.shape[1]) + 0.5)
-    lat = t.f + t.e * (np.arange(values.shape[0]) + 0.5)
-    return values[::-1], lon, lat[::-1]  # ascending latitude
+    n = int(variable.removeprefix("bio"))
+    path = gdal_path(SOURCE["url_template"].format(res=res), SOURCE["member_template"].format(res=res, n=n))
+    return read_window(path, bbox, pad_deg)
 
 
 def stage(variable: str, bbox: tuple[float, float, float, float], path: str | Path,
           pad_deg: float = 0.5, res: str = "30s", convention: str = "as-published") -> Path:
     """Write the staged input healpix-convert reads: a lat/lon Zarr dataset with a STAC item."""
-    import shapely
-    import xarray as xr
-
-    conventions.check(variable, convention)
-    values, lon, lat = _read_window(variable, bbox, pad_deg, res)
-    bio12 = None
-    if conventions.needs_bio12(variable, convention):
-        bio12, _, _ = _read_window("bio12", bbox, pad_deg, res)
-    values = conventions.apply(variable, values, convention, bio12=bio12)
-    ds = xr.Dataset({variable: (("lat", "lon"), values.astype("float32"))}, coords={"lat": lat, "lon": lon})
-    ds["lat"].attrs.update(standard_name="latitude", units="degrees_north")
-    ds["lon"].attrs.update(standard_name="longitude", units="degrees_east")
-    box = shapely.box(float(lon[0]), float(lat[0]), float(lon[-1]), float(lat[-1]))
-    stac_item = {
-        "type": "Feature",
-        "stac_version": "1.1.0",
-        # healpix-convert requires the field; the DEM GLO-30 notebook uses the projection extension
-        "stac_extensions": ["https://stac-extensions.github.io/projection/v2.0.0/schema.json"],
-        "id": f"worldclim-v21-{res}-{variable}-{conventions.target(convention)}",
-        "geometry": shapely.geometry.mapping(box),
-        "bbox": list(box.bounds),
-        "properties": {
-            "datetime": None,
-            "start_datetime": "1970-01-01T00:00:00Z",
-            "end_datetime": "2000-12-31T23:59:59Z",
-            "proj:code": "EPSG:4326",
-            "license": SOURCE["license"],
-        },
-        "links": [
-            {"rel": "cite-as", "href": f"https://doi.org/{SOURCE['doi']}"},
-            {"rel": "license", "href": SOURCE["terms_url"], "title": SOURCE["license_text"]},
-        ],
-        "assets": {},
-    }
-    path = Path(path)
-    xr.DataTree.from_dict({"/": xr.Dataset(attrs={"stac_discovery": stac_item}), "worldclim/v21": ds}).to_zarr(
-        path, mode="w-", zarr_format=3)
-    return path
+    bioclim.check(variable, convention, SOURCE_CONVENTION)
+    window = _read(variable, bbox, pad_deg, res)
+    bio12 = (_read("bio12", bbox, pad_deg, res).values
+             if bioclim.needs_bio12(variable, convention, SOURCE_CONVENTION) else None)
+    window = dataclasses.replace(
+        window, values=bioclim.apply(variable, window.values, convention, SOURCE_CONVENTION, bio12=bio12))
+    item = stac_item(
+        f"worldclim-v21-{res}-{variable}-{bioclim.target(convention, SOURCE_CONVENTION)}", window,
+        tuple(SOURCE["reference_period"]), license=SOURCE["license"],
+        links=[{"rel": "cite-as", "href": f"https://doi.org/{SOURCE['doi']}"},
+               {"rel": "license", "href": SOURCE["terms_url"], "title": SOURCE["license_text"]}])
+    return write_staged(path, GROUP, variable, window, item)
 
 
 def convert(variable: str, bbox: tuple[float, float, float, float], output: str | Path,
             staged: str | Path | None = None, res: str = "30s", convention: str = "as-published",
             **settings_kwargs):
     """Stage, then convert with healpix-convert's public API. Returns the output DataTree."""
-    import healpix_convert as hc
-    import shapely
-
     output = Path(output)
     staged = Path(staged) if staged else output.with_name(output.stem + "-staged.zarr")
     stage(variable, bbox, staged, res=res, convention=convention)
-    cfg = hc.ConvertSettings.model_validate(settings(variable, convention=convention, **settings_kwargs))
-    return hc.create_healpix_dataset([str(staged)], cfg, str(output), output_extent=shapely.box(*bbox))
+    return run(staged, settings(variable, convention=convention, **settings_kwargs), output, bbox)

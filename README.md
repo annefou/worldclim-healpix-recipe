@@ -16,7 +16,10 @@ on HEALPix (WGS84 ellipsoid, NESTED cell ids), converted with
 
 ## What a recipe is here
 
-Nothing is added to healpix-convert. A recipe is:
+Nothing is added to healpix-convert. The shared code (reading, staging, settings, BIOCLIM
+conventions) comes from [healpix-recipe-tools](https://github.com/annefou/healpix-recipe-tools);
+this repository holds only what is specific to WorldClim, following the
+[recipe contract](https://github.com/annefou/healpix-recipe-template/blob/main/CONTRACT.md). A recipe is:
 
 1. **a staging step**: one GeoTIFF is read *inside* WorldClim's remote zip (GDAL `/vsizip/` over
    `/vsicurl/`, no download of the 10 GB archive; a 4 x 4 degree window takes about 25-35 s) and
