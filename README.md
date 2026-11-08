@@ -99,6 +99,14 @@ convert("bio15", bbox, "bio15.zarr", convention="population")    # also reads bi
 
 The output states its convention (`bioclim_convention`) and, when converted, how (`comment`).
 
+## Coasts: land masks
+
+WorldClim marks the sea as nodata, unlike CHELSA, which has values over the sea. The recipe applies
+the same land mask as the CHELSA recipe, a mask **you choose** (`land_mask=`, see
+[healpix-recipe-tools](https://github.com/annefou/healpix-recipe-tools#coasts-and-land-masks)):
+Natural Earth 10 m land by default, any polygon file or URL, or `None` for WorldClim's own mask. With
+the same mask, coastal cells of the two sources describe the same land.
+
 ## Agreement with an independent reference
 
 The network tests convert `bio1` over central Iberia (6-3W, 39-42N) and compare the pyramid means
